@@ -73,7 +73,7 @@ void GraphInitial(string filename){
             Parameter();
         }else{
             while(s1){
-                int va = xx - 1, vb = atoi(s1)-1; // 
+                int va = xx - 1, vb = atoi(s1); // 
                 conD[va].push_back(vb);
                 s1=strtok(NULL," ");
             }
