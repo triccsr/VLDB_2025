@@ -28,11 +28,15 @@ vector<pair<int, int> > v2degree;
 vector<int> v2p, p2v, flg, vaff; // 删了label的顶点
 
 vector<pair<int, int> > DyEdges;
-// unordered_map<int, vector<>>
 
-int totalV = 0, threads = 1, Dcnt = 3, dv = MAXD, minTgt;
 
-double tt1 = 0, tt2 = 0, tt3 = 0, tt4 = 0;
+int totalV = 0, Dcnt = 3, dv = MAXD, minTgt;
+
+// === input parameters === //
+string Graphpath, Indexpath;  
+int program_choice, threads, dynamic_edge_num, query_task_num;
+float active_ratio;
+
 
 void Parameter(){
     MAXDIS = 2; MAXMOV = 1;
@@ -51,7 +55,7 @@ void GraphInitial(string filename){
 
     infile.open(filepath);
     if(!infile.is_open()){
-        cout<<"No such file!"<<endl;
+        cout<<"Cannot find the original graph file!"<<endl;
         exit(-1);
     }
 
@@ -69,7 +73,7 @@ void GraphInitial(string filename){
             Parameter();
         }else{
             while(s1){
-                int va = xx - 1, vb = atoi(s1); // 
+                int va = xx - 1, vb = atoi(s1)-1; // 
                 conD[va].push_back(vb);
                 s1=strtok(NULL," ");
             }
@@ -109,8 +113,6 @@ void GraphInitial(string filename){
 
         vector<unsigned>().swap(local);
     }
-
-    cout<<con[0].size()<<endl;
 }
 
 
@@ -123,7 +125,10 @@ bool can_update(int v, int dis, char *nowdis) {
 }
 
 bool can_update_add(int v, int dis, char *nowdis) {
-    for( int i = 0; i < pos[v][dis]; ++i ) {
+    int dmax = pos[v].size()-1, 
+        pla = dis>dmax? pos[v][dmax]:pos[v][dis];
+
+    for( int i = 0; i < pla; ++i ) {
         int w = label[v][i]>>MAXMOV, d = label[v][i]&MASK;
         if( nowdis[w] >= 0 && nowdis[w] + d <= dis ) return false;
     }
@@ -149,7 +154,7 @@ bool can_update_delete(int v, int dis, char *nowdis) {
 
 
 void IndexBuild(){
-
+    cout<<"Execute PSL to construct the 2-hop index ......"<<endl;
     omp_set_num_threads(threads);
 
     pos = new vector<int>[totalV];
@@ -236,7 +241,7 @@ void IndexBuild(){
 
                 vector<unsigned>().swap(label_new[u]);
 
-                if (cnt > 0) pos[u].push_back(label[u].size());
+                pos[u].push_back(label[u].size());
             }
         }
         
@@ -248,6 +253,8 @@ void IndexBuild(){
 
 
 void IndexSave(string path){
+    cout<<"Store the 2-hop index ......"<<endl;
+
     FILE *fout = fopen( path.c_str(), "wb" );
     
     fwrite(&totalV, sizeof(int), 1, fout); // 顶点数
@@ -333,14 +340,14 @@ void IndexPrint(){
             unsigned vid = lab[j] >> MAXMOV, dis = lab[j] & MASK;
             cout<<"$(v_"<<vid<<","<<dis<<")$, ";
         }
-
+        cout<<endl;
         // vector<unsigned>& cl = clab[i];
         // for (int j=0; j<cl.size(); ++j){
         //     unsigned vid = cl[j] >> MAXMOV, dis = cl[j] & MASK;
         //     cout<<"$("<<vid<<","<<dis<<")$, ";
         // }
 
-        cout<<endl;
+        
 
 // outfileX<<lab.size()<<endl;
         // for (int j=0; j<pos[i].size(); ++j){
@@ -353,23 +360,17 @@ void IndexPrint(){
 }
 
 
-void IndexSize(string name){
+void IndexSize(int flg){
+    
     long long cntt = 0;
-	const char *file = name.c_str();
-	fstream outfileX;
-	outfileX.open(file, ios::out);
 
     for (int i=0; i<totalV; ++i){
         cntt += label[i].size();
-        // if (i < 100)
-        // outfileX<<label[i].size()+clab[i].size()<<endl;
+        if (flg == 1)
+            cntt += clab[i].size();
     }
     
-    cout<<"label cnt: "<<cntt<<endl;
-
-
-    outfileX<<cntt<<endl;
-    outfileX.close();
+    cout<<"Total label number: "<<cntt<<endl;
 }
 
 
@@ -552,11 +553,11 @@ void IndexDel_Parallel(){ // 并行删除error label
                     if (vaff[u] == -1) vaff[u] = (int) cand[0];
                     else               vaff[u] = min(vaff[u], (int) cand[0]); // 后续剪枝
 
-                    cout<<"id: "<<u<<"    ";
-                    for (int ii=0; ii<cand.size(); ++ii){
-                        cout<<"v_"<<cand[ii]<<"  ";
-                    }
-                    cout<<endl;
+                    // cout<<"id: "<<u<<"    ";
+                    // for (int ii=0; ii<cand.size(); ++ii){
+                    //     cout<<"v_"<<cand[ii]<<"  ";
+                    // }
+                    // cout<<endl;
                 }
 
                 for( int i = 0; i < (int) cand.size(); ++i ) {
@@ -600,9 +601,9 @@ void IndexDel_Parallel(){ // 并行删除error label
         delete[] label_new;
     }
 
-    for (int i=0; i<totalV; ++i){
-        cout<<vaff[i]<<endl;
-    }
+    // for (int i=0; i<totalV; ++i){
+    //     cout<<vaff[i]<<endl;
+    // }
 }
 
 
@@ -795,14 +796,13 @@ void Einsert(unsigned vid, vector<unsigned>& edges){
 
 
 void InsertGraph(float cc){
-    
+
     int cnt = 0;
     float c = 0.8;
     
     while(cnt < Dcnt){
         
         int vid = (int)(totalV*cc) + cnt, adj = rand()%(int)(totalV*(1-c)) + (int)(totalV*c);
-        // int vid = 0, adj = 5;
 
         if (adj >= totalV) continue;
 
@@ -950,12 +950,6 @@ void Insert_Parallel(){
             vector<unsigned>(clab[u]).swap(clab[u]);
             sort(clab[u].begin(), clab[u].end());
             vaff[u] = (clab[u][0] >> MAXMOV);   
-
-            // cout<<" id: "<<u<<" :  ";
-            // for (int ii=0; ii<clab[u].size(); ++ii){
-            //     cout<<"$v_"<<(clab[u][ii] >> MAXMOV)<<"$ ";
-            // }       
-            // cout<<endl;
         } 
         
         cpos[u].push_back(clab[u].size());
@@ -1086,6 +1080,7 @@ void Insert_Parallel(){
 
         delete[] label_new;
         cout<<"dis: "<<dis<<"  cnt: "<<cnt<<endl;
+        
     }
 
     // for (int i=0; i<totalV; ++i){
@@ -1194,21 +1189,12 @@ void Insert_Remove_Parall(){
                     if (flg == -1) flg = cand_remove_2(nowdis, u, vid, dis);
                 }
 
-// // === 对比测试 ===
-// flg = cand_remove_no_prune(nowdis_extra, label[vid], dis);
-// if (flg == -1) flg = cand_remove(nowdis, clab[vid], dis);
-// if (flg == -1) flg = cand_remove(nowdis_extra, clab[vid], dis);
-// if (flg == -1) flg = cand_remove_2(nowdis, u, vid, dis);
-
                 if (flg == 1)  Rlab[u] = 1, Pla[u].push_back(i); // 对其他值的判定不会有影响
             } 
 
-            for( int i = 0; i < clab[u].size(); ++i ) 
-                nowdis[clab[u][i] >> MAXMOV] = -1;
+            for( int i = 0; i < clab[u].size(); ++i )   nowdis[clab[u][i] >> MAXMOV] = -1;
 
-            for( int i = 0; i < label[u].size(); ++i ){
-                nowdis_extra[label[u][i] >> MAXMOV] = -1;
-            }  
+            for( int i = 0; i < label[u].size(); ++i )  nowdis_extra[label[u][i] >> MAXMOV] = -1;
         }
 
         for( int u = pid; u < totalV; u += np ){
@@ -1217,21 +1203,23 @@ void Insert_Remove_Parall(){
             
             if (Rlab[u] == 0) continue;
 
-            int n_cand = 0, c = 0;
             sort(Pla[u].begin(), Pla[u].end());
 
+            unsigned elem = (totalV-1) << MAXMOV | 2; // 理论上应该不是label值
+            
+            for (unsigned pla:Pla[u]) label[u][pla] = elem; 
+
+            int n_cand = 0;
             for (int i=0; i<label[u].size(); ++i){
-                if (i != Pla[u][c]){
+                if ( label[u][i] != elem ){
                     label[u][n_cand++] = label[u][i];
-                }else{
-                    if (c < Pla[u].size()) 
-                        c += 1;
                 }
             }
-
             label[u].resize(n_cand);
         }
     }
+
+    delete[] Pla;
 }
 
 
@@ -1249,42 +1237,40 @@ unsigned Query(int u, int v){
 }
 
 
+int main(int argc, char **argv){
 
-int main(){
-    string na = "test";
-    string name = "/mnt/data/zyy/Full/" + na + ".graph",
-           Outpath = "/mnt/data/zyy/Index/" + na + ".bin",
-           Outpath1 = "/mnt/data/zyy/Index/" + na + "_Update.bin";
-    
-    int choice = 0, Qcnt = 10000;
-    float cp = 0.5;
+    if (argc != 8){
+        cout<<"Please input 8 parameters"<<endl;
+        exit(-1);
+    }
 
-    threads = 40;
-    Dcnt = 100;
+    Graphpath        = argv[1];       // the path of graph
+    Indexpath        = argv[2];       // the path of 2-hop index
+    program_choice   = atoi(argv[3]); // the execute program 0-5
+    active_ratio     = atof(argv[4]); // the activated ratio of vertices
+    threads          = atoi(argv[5]); // the number of threads
+    dynamic_edge_num = atoi(argv[6]); // the number of dynamic edges
+    query_task_num   = atoi(argv[7]); // the number of query tasks
 
-    GraphInitial(name);
+    GraphInitial(Graphpath);
 
-    cout<<"cp: "<<cp<<"  Dcnt: "<<Dcnt<<"  Choice: "<<choice<<endl;
-    cout<<na<<endl;
-    if (choice == 0){
+    if (program_choice == 0){
+        
         float t = omp_get_wtime();
         
         IndexBuild();
         
-        cout<<omp_get_wtime()-t<<" s"<<endl;    
-        // string na1 = "socLiveJ_Execution_time.txt";
-        // const char *file = na1.c_str();
-        // fstream outfileX;
-        // outfileX.open(file, ios::out);
-        // outfileX<<omp_get_wtime()-t<<" s"<<endl;
-        IndexPrint();
-        IndexSave(Outpath);
-    }else if (choice == 1){
+        cout<<"Buil time:  "<<omp_get_wtime()-t<<" s"<<endl;    
+        
+        IndexSave(Indexpath); 
 
-        IndexLoad(Outpath);
+    }else if (program_choice == 1){
+        
+        cout<<"Execute M2HL for edge deletion ......"<<endl;
 
-        DeleteGraph(cp); // 必须先清理所有的删边，否则反向激活会有误差
-        // DynamicFile(1);
+        IndexLoad(Indexpath);
+
+        DeleteGraph(active_ratio); // 必须先清理所有的删边，否则反向激活会有误差
 
         double t = omp_get_wtime();
 
@@ -1292,79 +1278,74 @@ int main(){
         
         IndexDel_Add();
 
-        cout<<omp_get_wtime()-t<<" s"<<endl;
+        cout<<"Update time:  "<<omp_get_wtime()-t<<" s"<<endl;
 
-        // IndexPrint();
-        // IndexSize("Update.txt");
+        IndexSize(1);
 
-    }else if (choice == 2){
-        DeleteGraph(cp);
+    }else if (program_choice == 2){
+        
+        cout<<"Execute PSL for edge deletion ......"<<endl;
+
+        DeleteGraph(active_ratio);
 
         double t = omp_get_wtime();
+
         IndexBuild();
-        cout<<omp_get_wtime()-t<<" s"<<endl;
-
-        IndexSize("PSL.txt");
-
-    }else if (choice == 3){ // Edge insert
         
-        IndexLoad(Outpath);
+        cout<<"Reconstruct time:  "<<omp_get_wtime()-t<<" s"<<endl;
 
-        InsertGraph(cp);
-        // DynamicFile(0);
+        IndexSize(0);
+
+    }else if (program_choice == 3){ // Edge insert
+        
+        cout<<"Execute M2HL for edge insertion ......"<<endl;
+
+        IndexLoad(Indexpath);
+
+        InsertGraph(active_ratio);
 
         double t = omp_get_wtime();
 
         Insert_Parallel();
 
-        // cout<<omp_get_wtime()-t<<" s"<<endl;
-
         Insert_Remove_Parall();
 
-        cout<<"Total time: "<<omp_get_wtime()-t<<" s"<<endl;
-    
-        // long long Lab_cnt = 0, Lab_n = 0;
-        // for (int i=0; i<totalV; ++i){
-        //     Lab_n += (label[i].size()+clab[i].size());
-        //     Lab_cnt += (label[i].size()+clab[i].size()-Pla[i].size());
-        // }
-        // cout<<"No delete la:  "<<Lab_n<<endl;
-        // cout<<"Total labels:  "<<Lab_cnt<<endl;
+        cout<<"Update time:  "<<omp_get_wtime()-t<<" s"<<endl;
 
-        
-        // IndexPrint();
-        // IndexSize("Add.txt");
+        IndexSize(1);
 
-    }else if (choice == 4){
-        InsertGraph(cp);
+    }else if (program_choice == 4){
+
+        cout<<"Execute PSL for edge insertion ......"<<endl;
+
+        InsertGraph(active_ratio);
+
         double t = omp_get_wtime();
+        
         IndexBuild();
-        cout<<"Reconstruct time: "<<omp_get_wtime()-t<<" s"<<endl;
-        IndexSize("PSL.txt");
-        // IndexPrint();
+        
+        cout<<"Reconstruct time:  "<<omp_get_wtime()-t<<" s"<<endl;
+        
+        IndexSize(0);
+
     }else{
-        IndexLoad(Outpath);
+        IndexLoad(Indexpath);
         omp_set_num_threads(threads);
         printf( "sorting...\n");
         #pragma omp parallel
         {
             int pid = omp_get_thread_num(), np = omp_get_num_threads();
-            for( int u = pid; u < totalV; u += np ) sort( label[u].begin(), label[u].end() );
+            for( int u = pid; u < totalV; u += np ) 
+                sort( label[u].begin(), label[u].end() );
         }
         double t = omp_get_wtime(), t1 = 0;
-        for (int i=0; i<Qcnt; ++i){
+        for (int i=0; i < query_task_num; ++i){
             int u = rand() % totalV, v = rand() % totalV;
             int dis = Query(u,v);
-            // cout<<u<<"  "<<v<<"  "<<dis<<endl;
         }
         t1 = omp_get_wtime() - t;
-        printf("Average query time = %0.3lf ns\n", t1*1000000000.0/Qcnt);
-
+        printf("Average query time = %0.3lf ns\n", t1*1000000000.0/query_task_num);
     }
-
-    
 
     return 0;
 }
-
-
