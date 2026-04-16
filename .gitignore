@@ -1,0 +1,4 @@
+*.txt
+*.index
+*.bin
+.vscode/
