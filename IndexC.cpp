@@ -20,6 +20,8 @@
 #include <utility>
 #include <vector>
 
+#include "ArrayOnHeap.hpp"
+
 #define MAXINT ((unsigned)4294967295)
 
 using namespace std;
@@ -27,14 +29,20 @@ using namespace std;
 #define MAXD 120
 unsigned MAXDIS, MAXMOV, MASK;
 vector<vector<unsigned> > con, conD;
-vector<unsigned>*label, *delete_labels, *clab, *Pla;
-vector<int>*pos, *cpos;
+ArrayOnHeap<vector<unsigned> > label, delete_labels, clab, Pla;
+ArrayOnHeap<vector<int> > pos, cpos;
 vector<pair<int, int> > v2degree;
 vector<int> v2p, p2v, flg, vaff;  // 删了label的顶点
 
 vector<pair<int, int> > DyEdges;
 
 int totalV = 0, Dcnt = 1000, dv = MAXD, minTgt;
+
+string StripExt(const string& filename) {
+    size_t dot = filename.rfind('.');
+    if (dot == string::npos) return filename;
+    return filename.substr(0, dot);
+}
 
 // === input parameters === //
 string Graphpath, Indexpath;
@@ -65,9 +73,9 @@ void GraphInitial(string filename) {
     long xx = 0;
 
     while (getline(infile, s)) {
-        char* strc = new char[strlen(s.c_str()) + 1];
-        strcpy(strc, s.c_str());
-        char* s1 = strtok(strc, " ");
+        ArrayOnHeap<char> strc(strlen(s.c_str()) + 1, ArrayOnHeap<char>::uninitialized);
+        strcpy(strc.data(), s.c_str());
+        char* s1 = strtok(strc.data(), " ");
 
         if (xx == 0) {
             totalV = atoi(s1);
@@ -83,8 +91,6 @@ void GraphInitial(string filename) {
         }
 
         xx += 1;
-
-        delete s1, strc;
     }
 
     infile.close();
@@ -97,7 +103,7 @@ void GraphInitial(string filename) {
     p2v.resize(totalV, -1);
 
     for (int i = 0; i < v2degree.size(); ++i) {
-        v2p[-v2degree[i].second] = i;
+        v2p[-v2degree[i].second] = i;  // old 2 new
         p2v[i] = -v2degree[i].second;  // new 2 old
     }
 
@@ -142,9 +148,9 @@ void GraphReorder() {
     }
     con.swap(conNew);
 
-    if (label != nullptr && pos != nullptr) {
-        vector<unsigned>* labelNew = new vector<unsigned>[totalV];
-        vector<int>* posNew = new vector<int>[totalV];
+    if (!label.empty() && !pos.empty()) {
+        ArrayOnHeap<vector<unsigned> > labelNew(totalV);
+        ArrayOnHeap<vector<int> > posNew(totalV);
 
         for (int newVid = 0; newVid < totalV; ++newVid) {
             int oldVid = new2old[newVid];
@@ -165,10 +171,8 @@ void GraphReorder() {
             }
         }
 
-        delete[] label;
-        label = labelNew;
-        delete[] pos;
-        pos = posNew;
+        label = std::move(labelNew);
+        pos = std::move(posNew);
     }
 
     // Keep the original semantics:
@@ -193,6 +197,81 @@ void GraphReorder() {
         v2p = old2new;
         p2v = new2old;
     }
+}
+
+void GraphReorder_vp(vector<int> new_v2p, vector<int> new_p2v) {
+    if (new_v2p.empty() && new_p2v.empty()) return;
+
+    auto check_bijection = [&](const vector<int>& mapping, const char* name) {
+        assert((int)mapping.size() == totalV && "mapping size != totalV");
+        vector<bool> seen(totalV, false);
+        for (int i = 0; i < totalV; ++i) {
+            assert(mapping[i] >= 0 && mapping[i] < totalV && "mapping value out of range [0, totalV)");
+            assert(!seen[mapping[i]] && "duplicate value in mapping, not a bijection");
+            seen[mapping[i]] = true;
+        }
+    };
+
+    if (!new_v2p.empty()) check_bijection(new_v2p, "new_v2p");
+    if (!new_p2v.empty()) check_bijection(new_p2v, "new_p2v");
+
+    if (new_v2p.empty()) {
+        new_v2p.resize(totalV);
+        for (int i = 0; i < totalV; ++i) new_v2p[new_p2v[i]] = i;
+    } else if (new_p2v.empty()) {
+        new_p2v.resize(totalV);
+        for (int i = 0; i < totalV; ++i) new_p2v[new_v2p[i]] = i;
+    }
+
+    vector<int> old2new(totalV, -1), new2old(totalV, -1);
+    for (int cur = 0; cur < totalV; ++cur) {
+        int orig = p2v[cur];
+        int newId = new_v2p[orig];
+        old2new[cur] = newId;
+        new2old[newId] = cur;
+    }
+
+    vector<vector<unsigned> > conNew(totalV);
+    for (int newVid = 0; newVid < totalV; ++newVid) {
+        int oldVid = new2old[newVid];
+        conNew[newVid].reserve(con[oldVid].size());
+        for (int i = 0; i < con[oldVid].size(); ++i) {
+            unsigned oldAdj = con[oldVid][i];
+            conNew[newVid].push_back((unsigned)old2new[oldAdj]);
+        }
+        sort(conNew[newVid].begin(), conNew[newVid].end());
+    }
+    con.swap(conNew);
+
+    if (!label.empty() && !pos.empty()) {
+        ArrayOnHeap<vector<unsigned> > labelNew(totalV);
+        ArrayOnHeap<vector<int> > posNew(totalV);
+
+        for (int newVid = 0; newVid < totalV; ++newVid) {
+            int oldVid = new2old[newVid];
+            posNew[newVid] = pos[oldVid];
+
+            labelNew[newVid].reserve(label[oldVid].size());
+            for (int i = 0; i < label[oldVid].size(); ++i) {
+                unsigned oldHub = label[oldVid][i] >> MAXMOV;
+                unsigned dis = label[oldVid][i] & MASK;
+                unsigned newHub = (unsigned)old2new[oldHub];
+                labelNew[newVid].push_back((newHub << MAXMOV) | dis);
+            }
+
+            for (int d = 0; d < posNew[newVid].size(); ++d) {
+                int l = d == 0 ? 0 : posNew[newVid][d - 1];
+                int r = posNew[newVid][d];
+                sort(labelNew[newVid].begin() + l, labelNew[newVid].begin() + r);
+            }
+        }
+
+        label = std::move(labelNew);
+        pos = std::move(posNew);
+    }
+
+    v2p = new_v2p;
+    p2v = new_p2v;
 }
 
 bool can_update(int v, int dis, char* nowdis) {
@@ -233,9 +312,9 @@ void IndexBuild() {
     cout << "Execute PSL to construct the 2-hop index ......" << endl;
     omp_set_num_threads(threads);
 
-    pos = new vector<int>[totalV];
+    pos = ArrayOnHeap<vector<int> >(totalV);
 
-    label = new vector<unsigned>[totalV];  // unsigned 整合了 id+dis
+    label = ArrayOnHeap<vector<unsigned> >(totalV);
 
     for (int i = 0; i < totalV; ++i) {
         label[i].push_back((((unsigned)i) << MAXMOV) | 0);
@@ -250,17 +329,16 @@ void IndexBuild() {
     int dis = 2;
     for (long long cnt = 1; cnt && dis <= MAXDIS; ++dis) {
         cnt = 0;
-        vector<unsigned>* label_new = new vector<unsigned>[totalV];
+        ArrayOnHeap<vector<unsigned> > label_new(totalV);
 #pragma omp parallel
         {
             int pid = omp_get_thread_num(), np = omp_get_num_threads();
             long long local_cnt = 0;
-            unsigned char* used = new unsigned char[totalV / 8 + 1];
-            memset(used, 0, sizeof(unsigned char) * (totalV / 8 + 1));
+            ArrayOnHeap<unsigned char> used(totalV / 8 + 1);
             vector<int> cand;
 
-            char* nowdis = new char[totalV];
-            memset(nowdis, -1, sizeof(char) * totalV);
+            ArrayOnHeap<char> nowdis(totalV, ArrayOnHeap<char>::uninitialized);
+            nowdis.memset(-1);
 
             for (int u = pid; u < totalV; u += np) {
                 cand.clear();
@@ -283,7 +361,7 @@ void IndexBuild() {
 
                 for (int i = 0; i < (int)cand.size(); ++i) {
                     used[cand[i] / 8] = 0;
-                    if (can_update(cand[i], dis, nowdis)) cand[n_cand++] = cand[i];
+                    if (can_update(cand[i], dis, nowdis.data())) cand[n_cand++] = cand[i];
                 }
 
                 cand.resize(n_cand);
@@ -299,9 +377,6 @@ void IndexBuild() {
             {
                 cnt += local_cnt;
             }
-
-            delete[] used;
-            delete[] nowdis;
         }
 
 #pragma omp parallel
@@ -319,7 +394,6 @@ void IndexBuild() {
         }
 
         cout << "Distance: " << dis << "   Cnt: " << cnt << endl;
-        delete[] label_new;
     }
 }
 
@@ -335,27 +409,25 @@ void IndexSave(string path) {
         fwrite(&len, sizeof(int), 1, fout);  // 每个顶点的 labels 的 数量
     }
 
-    unsigned* s = new unsigned[totalV];  // 每个顶点的label总数是有限的
+    ArrayOnHeap<unsigned> s(totalV, ArrayOnHeap<unsigned>::uninitialized);
 
     for (int i = 0; i < totalV; ++i) {
         int len = (int)label[i].size();
         for (int j = 0; j < len; ++j) s[j] = label[i][j];
-        fwrite(s, sizeof(unsigned), len, fout);  // 写入每个顶点的labels
+        fwrite(s.data(), sizeof(unsigned), len, fout);
     }
 
     // ===========================
     for (int i = 0; i < totalV; ++i) {
         int len = (int)pos[i].size();
-        fwrite(&len, sizeof(int), 1, fout);  // 每个顶点的 pos 的 数量
+        fwrite(&len, sizeof(int), 1, fout);
     }
 
     for (int i = 0; i < totalV; ++i) {
         int len = (int)pos[i].size();
         for (int j = 0; j < len; ++j) s[j] = pos[i][j];
-        fwrite(s, sizeof(unsigned), len, fout);  // 写入每个顶点的labels
+        fwrite(s.data(), sizeof(unsigned), len, fout);
     }
-
-    delete[] s;
 
     fwrite(&MAXMOV, sizeof(int), 1, fout);
     fclose(fout);
@@ -376,28 +448,25 @@ void IndexLoad(string path) {
     FILE* fin = fopen(path.c_str(), "rb");
     size_t elements_read = fread(&totalV, sizeof(int), 1, fin);
 
-    int* len = new int[totalV];
-    elements_read = fread(len, sizeof(int), totalV, fin);  // 读取每个顶点的标签的数量
+    ArrayOnHeap<int> len(totalV, ArrayOnHeap<int>::uninitialized);
+    elements_read = fread(len.data(), sizeof(int), totalV, fin);
 
-    label = new vector<unsigned>[totalV];
-    unsigned* s = new unsigned[totalV];
+    label = ArrayOnHeap<vector<unsigned> >(totalV);
+    ArrayOnHeap<unsigned> s(totalV, ArrayOnHeap<unsigned>::uninitialized);
 
     for (int i = 0; i < totalV; ++i) {
-        elements_read = fread(s, sizeof(unsigned), len[i], fin);
+        elements_read = fread(s.data(), sizeof(unsigned), len[i], fin);
         label[i].reserve(len[i]);
-        label[i].assign(s, s + len[i]);
+        label[i].assign(s.data(), s.data() + len[i]);
     }
 
-    elements_read = fread(len, sizeof(int), totalV, fin);  // 读取每个顶点的标签的数量
-    pos = new vector<int>[totalV];
+    elements_read = fread(len.data(), sizeof(int), totalV, fin);
+    pos = ArrayOnHeap<vector<int> >(totalV);
     for (int i = 0; i < totalV; ++i) {
-        elements_read = fread(s, sizeof(unsigned), len[i], fin);
+        elements_read = fread(s.data(), sizeof(unsigned), len[i], fin);
         pos[i].reserve(len[i]);
-        pos[i].assign(s, s + len[i]);
+        pos[i].assign(s.data(), s.data() + len[i]);
     }
-
-    delete[] s;
-    delete[] len;
 
     elements_read = fread(&MAXMOV, sizeof(unsigned), 1, fin);
     MAXDIS = 1 << MAXMOV;
@@ -554,23 +623,22 @@ void IndexDel_Parallel() {  // 并行删除error label
 
     vaff.resize(totalV, -1);
 
-    delete_labels = new vector<unsigned>[totalV];
+    delete_labels = ArrayOnHeap<vector<unsigned> >(totalV);
 
     int dis = 1;
     for (long long cnt = 1; cnt && dis <= MAXDIS; ++dis) {
         cnt = 0;
-        vector<unsigned>* label_new = new vector<unsigned>[totalV];
+        ArrayOnHeap<vector<unsigned> > label_new(totalV);
 
 #pragma omp parallel
         {
             int pid = omp_get_thread_num(), np = omp_get_num_threads();
             long long local_cnt = 0;
-            unsigned char* used = new unsigned char[totalV];
-            memset(used, 0, sizeof(unsigned char) * (totalV));
+            ArrayOnHeap<unsigned char> used(totalV);
             vector<int> cand;
 
-            int* nowdis = new int[totalV];
-            memset(nowdis, -1, sizeof(int) * totalV);
+            ArrayOnHeap<int> nowdis(totalV, ArrayOnHeap<int>::uninitialized);
+            nowdis.memset(-1);
 
             for (int u = pid; u < totalV; u += np) {
                 cand.clear();
@@ -671,9 +739,6 @@ void IndexDel_Parallel() {  // 并行删除error label
             {
                 cnt += local_cnt;
             }
-
-            delete[] used;
-            delete[] nowdis;
         }
 
 #pragma omp parallel
@@ -695,9 +760,7 @@ void IndexDel_Parallel() {  // 并行删除error label
         }
 
         cout << "Distance: " << dis << "  Delete Cnt: " << cnt << endl;
-        delete[] label_new;
     }
-    delete[] delete_labels;
 
     // for (int i=0; i<totalV; ++i){
     //     cout<<vaff[i]<<endl;
@@ -707,7 +770,7 @@ void IndexDel_Parallel() {  // 并行删除error label
 void IndexDel_Add() {
     omp_set_num_threads(threads);
 
-    clab = new vector<unsigned>[totalV];  // 每回合更新的labels
+    clab = ArrayOnHeap<vector<unsigned> >(totalV);
 
 #pragma omp parallel
     {
@@ -718,7 +781,7 @@ void IndexDel_Add() {
 
                 if (vaff[vid] == -1) continue;
 
-                clab[u].push_back(vid);  // Vaff中的点都要被放入到激活名单
+                clab[u].push_back(vid);
             }
         }
     }
@@ -726,18 +789,17 @@ void IndexDel_Add() {
     int dis = 2;
     for (long long cnt = 1; cnt > 0; ++dis) {
         cnt = 0;
-        vector<unsigned>* label_new = new vector<unsigned>[totalV];
+        ArrayOnHeap<vector<unsigned> > label_new(totalV);
 
 #pragma omp parallel
         {
             int pid = omp_get_thread_num(), np = omp_get_num_threads();
             long long local_cnt = 0, local_cnt1 = 0;
-            unsigned char* used = new unsigned char[totalV / 8 + 1];
-            memset(used, 0, sizeof(unsigned char) * (totalV / 8 + 1));
+            ArrayOnHeap<unsigned char> used(totalV / 8 + 1);
             vector<int> cand;
 
-            char* nowdis = new char[totalV];
-            memset(nowdis, -1, sizeof(char) * totalV);
+            ArrayOnHeap<char> nowdis(totalV, ArrayOnHeap<char>::uninitialized);
+            nowdis.memset(-1);
 
             for (int u = pid; u < totalV; u += np) {  // 可以考虑减少线程调度的开销，从代码的层次
 
@@ -788,7 +850,7 @@ void IndexDel_Add() {
                     if (nowdis[cand[i]] == dis) {
                         ++local_cnt;  // 直连标签在下一个回合中，需要进行判断
                         if (vaff[cand[i]] != -1) cand[n_cand++] = cand[i];
-                    } else if (can_update_delete(cand[i], dis, nowdis)) {
+                    } else if (can_update_delete(cand[i], dis, nowdis.data())) {
                         // cout<<"id: "<<u<<"  v_"<<cand[i]<<endl;
                         cand[n_cand++] = cand[i], ++local_cnt;
                     }
@@ -809,9 +871,6 @@ void IndexDel_Add() {
             {
                 cnt += local_cnt;
             }
-
-            delete[] used;
-            delete[] nowdis;
         }
 
 #pragma omp parallel
@@ -866,7 +925,6 @@ void IndexDel_Add() {
                 vector<unsigned>().swap(label_new[u]);
             }
         }
-        delete[] label_new;
         cout << "dis: " << dis << "  cnt: " << cnt << endl;
     }
 }
@@ -877,13 +935,16 @@ void IndexReorder() {
 
     vaff.resize(totalV, -1);
 
-    vector<unsigned>* bad_inv_labels = new vector<unsigned>[totalV];
+    ArrayOnHeap<vector<unsigned> > bad_inv_labels(totalV);
+    if (label.empty() || pos.empty()) {
+        std::cout << "No label to reorder" << std::endl;
+        return;
+    }
 
     //* ===================== removing part ==========================
 
-    std::vector<unsigned>*prev_mod_labels = new vector<unsigned>[totalV],
-    *cur_mod_labels = new vector<unsigned>[totalV];
-    std::vector<size_t>* deleteIndexes = new vector<size_t>[totalV];
+    ArrayOnHeap<vector<unsigned> > prev_mod_labels(totalV), cur_mod_labels(totalV);
+    ArrayOnHeap<vector<size_t> > deleteIndexes(totalV);
 
     unsigned reorderMaxDis = 0;
     for (int u = 0; u < totalV; ++u) {
@@ -897,12 +958,11 @@ void IndexReorder() {
         {
             int pid = omp_get_thread_num(), np = omp_get_num_threads();
             long long local_cnt = 0;
-            bool* used = new bool[totalV];
-            memset(used, 0, sizeof(bool) * (totalV));
+            ArrayOnHeap<bool> used(totalV);
             vector<int> cand;
 
-            int* nowIndex = new int[totalV];
-            memset(nowIndex, -1, sizeof(int) * totalV);
+            ArrayOnHeap<int> nowIndex(totalV, ArrayOnHeap<int>::uninitialized);
+            nowIndex.memset(-1);
 
             for (int u = pid; u < totalV; u += np) {
                 cand.clear();
@@ -955,9 +1015,6 @@ void IndexReorder() {
             {
                 cur_cnt += local_cnt;
             }
-
-            delete[] used;
-            delete[] nowIndex;
         }
 #pragma omp parallel
         {
@@ -1005,8 +1062,6 @@ void IndexReorder() {
             }
         }
     }
-    delete[] deleteIndexes;
-
     // for (int u = 0; u < totalV; ++u) {
     //     int prev = 0;
     //     for (int d = 0; d < (int)pos[u].size(); ++d) {
@@ -1028,22 +1083,20 @@ void IndexReorder() {
     // cout << "pos check after removing part: PASS" << endl;
 
     //* ====================== inserting part ===========================
-    int* badLabelTail = new int[totalV];
-    memset(badLabelTail, 0, sizeof(int) * totalV);
+    ArrayOnHeap<int> badLabelTail(totalV);
 
-    std::vector<unsigned>* new_label = new std::vector<unsigned>[totalV];
+    ArrayOnHeap<vector<unsigned> > new_label(totalV);
 
     cur_cnt = 0, prev_cnt = 0;
-    for (unsigned dis = 1; dis <= reorderMaxDis; ++dis) {
+    for (unsigned dis = 1; dis <= reorderMaxDis || prev_cnt != 0; ++dis) {
         // #pragma omp parallel
         {
             // int pid = omp_get_thread_num(), np = omp_get_num_threads();
             int pid = 0, np = 1;
             long long local_cnt = 0;
-            bool* used = new bool[totalV];
-            memset(used, 0, sizeof(bool) * (totalV));
-            char* nowdis = new char[totalV];
-            memset(nowdis, -1, sizeof(char) * totalV);
+            ArrayOnHeap<bool> used(totalV);
+            ArrayOnHeap<char> nowdis(totalV, ArrayOnHeap<char>::uninitialized);
+            nowdis.memset(-1);
 
             for (int u = pid; u < totalV; u += np) {
                 vector<int> cand;
@@ -1060,8 +1113,15 @@ void IndexReorder() {
                     }
                     ++badLabelTail[u];
                 }
+
+                int pla1 = dis < pos[u].size() ? pos[u][dis] : label[u].size();
+
                 //* 从上一层被加入的label往下推
                 if (prev_cnt > 0) {
+                    int pla2 = (dis + 1 < pos[u].size()) ? pos[u][dis + 1] : label[u].size();
+                    for (size_t i = pla1; i < pla2; ++i) {
+                        used[label[u][i] >> MAXMOV] = true;
+                    }
                     for (int w : con[u]) {
                         for (unsigned l : prev_mod_labels[w]) {
                             int v = l >> MAXMOV;
@@ -1072,11 +1132,12 @@ void IndexReorder() {
                             }
                         }
                     }
+                    for (size_t i = pla1; i < pla2; ++i) {
+                        used[label[u][i] >> MAXMOV] = false;
+                    }
                 }
 
                 if (cand.size() == 0) continue;
-
-                int pla1 = dis < pos[u].size() ? pos[u][dis] : label[u].size();
 
                 for (int i = 0; i < pla1; ++i) {  // 便于判断
                     if ((label[u][i] >> MAXMOV) > u) continue;
@@ -1092,18 +1153,23 @@ void IndexReorder() {
                     for (int i = 0; i < pla1; ++i) {
                         int w = label[v][i] >> MAXMOV, d = label[v][i] & MASK;
                         assert(w <= v);
-                        if (nowdis[w] >= 0 && nowdis[w] + d <= dis) return false;
+                        if (nowdis[w] >= 0 && nowdis[w] + d <= dis) {
+                            return false;
+                        }
                     }
                     for (unsigned newL : new_label[v]) {
                         int w = newL >> MAXMOV, d = newL & MASK;
                         assert(w <= v);
-                        if (nowdis[w] >= 0 && nowdis[w] + d <= dis) return false;
+                        if (nowdis[w] >= 0 && nowdis[w] + d <= dis) {
+                            return false;
+                        }
                     }
                     return true;
                 };
 
-                sort(cand.begin(), cand.end());
+                // sort(cand.begin(), cand.end());
 
+                size_t old_size = new_label[u].size();
                 for (int i = 0; i < (int)cand.size(); ++i) {
                     used[cand[i]] = 0;
                     if (can_update_delete_with_new(cand[i], dis)) {
@@ -1114,6 +1180,7 @@ void IndexReorder() {
                         new_label[u].push_back(labelU);
                     }
                 }
+                std::sort(new_label[u].begin() + old_size, new_label[u].end());
 
                 for (int i = 0; i < pla1; ++i)  // 便于判断
                     nowdis[label[u][i] >> MAXMOV] = -1;
@@ -1176,12 +1243,6 @@ void IndexReorder() {
             label[u].swap(merged);
         }
     }
-
-    delete[] new_label;
-    delete[] badLabelTail;
-    delete[] bad_inv_labels;
-    delete[] prev_mod_labels;
-    delete[] cur_mod_labels;
 }
 
 // ============ for edge insertion =============
@@ -1241,9 +1302,9 @@ void DynamicFile(int flg) {
     long xx = 0;
 
     while (getline(infile, s)) {
-        char* strc = new char[strlen(s.c_str()) + 1];
-        strcpy(strc, s.c_str());
-        char* s1 = strtok(strc, " ");
+        ArrayOnHeap<char> strc(strlen(s.c_str()) + 1, ArrayOnHeap<char>::uninitialized);
+        strcpy(strc.data(), s.c_str());
+        char* s1 = strtok(strc.data(), " ");
 
         int ii = 0, va, vb;
         while (s1) {
@@ -1252,7 +1313,6 @@ void DynamicFile(int flg) {
             else {
                 vb = atoi(s1);
                 DyEdges.push_back(make_pair(va, vb));
-                // cout<<va<<"  "<<vb<<endl;
             }
 
             ii += 1;
@@ -1260,8 +1320,6 @@ void DynamicFile(int flg) {
         }
 
         xx += 1;
-
-        delete s1, strc;
     }
 
     for (int i = 0; i < DyEdges.size(); ++i) {
@@ -1321,8 +1379,8 @@ int ifdelete(unsigned tgt, unsigned tdis, unsigned v, unsigned vdis) {  // remov
 void Insert_Parallel() {
     omp_set_num_threads(threads);
 
-    clab = new vector<unsigned>[totalV];  // 每回合更新的labels
-    cpos = new vector<int>[totalV];
+    clab = ArrayOnHeap<vector<unsigned> >(totalV);
+    cpos = ArrayOnHeap<vector<int> >(totalV);
 
     vaff.resize(totalV, -1);
 
@@ -1348,18 +1406,17 @@ void Insert_Parallel() {
     int dis = 2;
     for (long long cnt = 1, cnttt = 0; cnt > 0; ++dis) {
         cnt = 0, cnttt = 0;
-        vector<unsigned>* label_new = new vector<unsigned>[totalV];
+        ArrayOnHeap<vector<unsigned> > label_new(totalV);
 
 #pragma omp parallel
         {
             int pid = omp_get_thread_num(), np = omp_get_num_threads();
             long long local_cnt = 0;
-            unsigned char* used = new unsigned char[totalV / 8 + 1];
-            memset(used, 0, sizeof(unsigned char) * (totalV / 8 + 1));
+            ArrayOnHeap<unsigned char> used(totalV / 8 + 1);
             vector<int> cand;
 
-            char* nowdis = new char[totalV];
-            memset(nowdis, -1, sizeof(char) * totalV);
+            ArrayOnHeap<char> nowdis(totalV, ArrayOnHeap<char>::uninitialized);
+            nowdis.memset(-1);
 
             for (int u = pid; u < totalV; u += np) {
                 cand.clear();
@@ -1409,7 +1466,7 @@ void Insert_Parallel() {
 
                     if (nowdis[cand[i]] != -1) continue;  // 已经是直连，不需要再去判断
 
-                    if (can_update_add(cand[i], dis, nowdis)) {
+                    if (can_update_add(cand[i], dis, nowdis.data())) {
                         cand[n_cand++] = cand[i];
                     }
                 }
@@ -1444,9 +1501,6 @@ void Insert_Parallel() {
             {
                 cnt += local_cnt;
             }
-
-            delete[] used;
-            delete[] nowdis;
         }
 
 #pragma omp parallel
@@ -1461,8 +1515,6 @@ void Insert_Parallel() {
                 cpos[u].push_back(clab[u].size());
             }
         }
-
-        delete[] label_new;
         cout << "dis: " << dis << "  cnt: " << cnt << endl;
     }
 
@@ -1523,7 +1575,7 @@ int cand_remove_2(vector<int>& nowD, int u, int v, int dis) {
 void Insert_Remove_Parall() {
     vector<int> Rlab(totalV);
     long long cnt1 = 0, cnt2 = 0;
-    Pla = new vector<unsigned>[totalV];
+    Pla = ArrayOnHeap<vector<unsigned> >(totalV);
 
 #pragma omp parallel
     {
@@ -1593,8 +1645,55 @@ void Insert_Remove_Parall() {
             label[u].resize(n_cand);
         }
     }
+}
 
-    delete[] Pla;
+bool PosCheck(vector<unsigned>* lab, vector<int>* p) {
+    bool ok = true;
+    for (int u = 0; u < totalV; ++u) {
+        // if (p[u].empty()) {
+        //     cout << "pos[" << u << "] is empty!" << endl;
+        //     ok = false;
+        //     continue;
+        // }
+
+        // if (p[u][0] != 1) {
+        //     cout << "pos[" << u << "][0] != 1, got " << p[u][0] << endl;
+        //     ok = false;
+        // }
+
+        int prev = 0;
+        for (int d = 0; d < (int)p[u].size(); ++d) {
+            if (p[u][d] < prev || p[u][d] > (int)lab[u].size()) {
+                cout << "pos[" << u << "][" << d << "] = " << p[u][d] << " out of range" << endl;
+                ok = false;
+                break;
+            }
+            for (int j = prev; j < p[u][d]; ++j) {
+                unsigned actualDis = lab[u][j] & MASK;
+                if (actualDis != (unsigned)d) {
+                    cout << "label[" << u << "][" << j << "] dis=" << actualDis << " but expected " << d << endl;
+                    ok = false;
+                }
+                if (d > 0 && j > prev) {
+                    unsigned prevHub = lab[u][j - 1] >> MAXMOV;
+                    unsigned curHub = lab[u][j] >> MAXMOV;
+                    if (curHub < prevHub) {
+                        cout << "label[" << u << "] not sorted at index " << j << " within dis=" << d << endl;
+                        ok = false;
+                    }
+                }
+            }
+            prev = p[u][d];
+        }
+        for (size_t i = prev; i < lab[u].size(); ++i) {
+            unsigned actualDis = lab[u][i] & MASK;
+            if (actualDis != p[u].size()) {
+                cout << "label[" << u << "][" << i << "] dis=" << actualDis << " but expected " << p[u].size() << endl;
+                ok = false;
+            }
+        }
+    }
+    return ok;
 }
 
 void TestReorder() {
@@ -1606,64 +1705,10 @@ void TestReorder() {
     IndexReorder();
     cout << "Reorder time:  " << omp_get_wtime() - t << " s" << endl;
 
-    vector<unsigned>* reorderLabel = label;
-    vector<int>* reorderPos = pos;
-    label = nullptr;
-    pos = nullptr;
+    ArrayOnHeap<vector<unsigned> > reorderLabel = std::move(label);
+    ArrayOnHeap<vector<int> > reorderPos = std::move(pos);
 
-    // 1. check pos definition
-    bool posOk = true;
-    for (int u = 0; u < totalV; ++u) {
-        vector<unsigned>& lab = reorderLabel[u];
-        vector<int>& p = reorderPos[u];
-
-        if (p.empty()) {
-            cout << "pos[" << u << "] is empty!" << endl;
-            posOk = false;
-            continue;
-        }
-
-        if (p[0] != 1) {
-            cout << "pos[" << u << "][0] != 1, got " << p[0] << endl;
-            posOk = false;
-        }
-
-        int prev = 0;
-        for (int d = 0; d < (int)p.size(); ++d) {
-            if (p[d] < prev || p[d] > (int)lab.size()) {
-                cout << "pos[" << u << "][" << d << "] = " << p[d] << " out of range" << endl;
-                posOk = false;
-                break;
-            }
-            for (int j = prev; j < p[d]; ++j) {
-                unsigned actualDis = lab[j] & MASK;
-                if (actualDis != (unsigned)d) {
-                    cout << "label[" << u << "][" << j << "] dis=" << actualDis << " but expected " << d << endl;
-                    posOk = false;
-                }
-                if (d > 0 && j > prev) {
-                    unsigned prevHub = lab[j - 1] >> MAXMOV;
-                    unsigned curHub = lab[j] >> MAXMOV;
-                    if (curHub < prevHub) {
-                        cout << "label[" << u << "] not sorted at index " << j << " within dis=" << d << endl;
-                        posOk = false;
-                    }
-                }
-            }
-            prev = p[d];
-        }
-        for (size_t i = prev; i < lab.size(); ++i) {
-            unsigned actualDis = lab[i] & MASK;
-            if (actualDis != p.size()) {
-                cout << "label[" << u << "][" << i << "] dis=" << actualDis << " but expected " << p.size() << endl;
-                posOk = false;
-            }
-        }
-        // if (prev != (int)lab.size()) {
-        //     cout << "pos[" << u << "] last boundary " << prev << " != label size " << lab.size() << endl;
-        //     posOk = false;
-        // }
-    }
+    bool posOk = PosCheck(reorderLabel.data(), reorderPos.data());
     cout << "pos check: " << (posOk ? "PASS" : "FAIL") << endl;
 
     // 2. rebuild index from scratch and compare
@@ -1701,9 +1746,6 @@ void TestReorder() {
     }
     cout << "label check: " << (labelOk ? "PASS" : "FAIL") << endl;
 
-    delete[] reorderLabel;
-    delete[] reorderPos;
-
     cout << "=== TestReorder Done ===" << endl;
 }
 
@@ -1716,6 +1758,141 @@ unsigned Query(int u, int v) {
             dis = min(dis, (label[u][i] & MASK) + (label[v][j] & MASK));
     }
     return dis;
+}
+
+void OrderBuild(string graphName) {
+    string suffixes[] = {"d", "b", "s"};
+
+    for (int si = 0; si < 3; ++si) {
+        string orderFile = graphName + "_" + suffixes[si] + ".order";
+        ifstream fin(orderFile);
+        if (!fin.is_open()) {
+            cout << "Cannot open order file: " << orderFile << ", skipping." << endl;
+            continue;
+        }
+
+        con.clear();
+        conD.clear();
+        v2degree.clear();
+        v2p.clear();
+        p2v.clear();
+        totalV = 0;
+        label = ArrayOnHeap<vector<unsigned> >();
+        pos = ArrayOnHeap<vector<int> >();
+
+        GraphInitial(graphName + ".txt");
+
+        vector<int> new_p2v(totalV);
+        for (int i = 0; i < totalV; ++i) fin >> new_p2v[i];
+        fin.close();
+
+        GraphReorder_vp({}, new_p2v);
+
+        cout << "=== Building index with order: " << suffixes[si] << " ===" << endl;
+        double t = omp_get_wtime();
+        IndexBuild();
+        cout << "Build time (" << suffixes[si] << "): " << omp_get_wtime() - t << " s" << endl;
+
+        IndexSize(0);
+
+        string indexFile = graphName + "_" + suffixes[si] + ".bin";
+        IndexSave(indexFile);
+        cout << "Index saved to: " << indexFile << endl;
+    }
+}
+
+void TestOrderReorder(string graphName, string srcOrder, string tgtOrder) {
+    cout << "=== TestOrderReorder: " << srcOrder << " -> " << tgtOrder << " ===" << endl;
+
+    con.clear();
+    conD.clear();
+    v2degree.clear();
+    v2p.clear();
+    p2v.clear();
+    totalV = 0;
+    label = ArrayOnHeap<vector<unsigned> >();
+    pos = ArrayOnHeap<vector<int> >();
+
+    GraphInitial(graphName + ".txt");
+
+    {
+        ifstream fin(graphName + "_" + srcOrder + ".order");
+        if (!fin.is_open()) {
+            cout << "Cannot open " << srcOrder << " order file!" << endl;
+            return;
+        }
+        vector<int> src_p2v(totalV);
+        for (int i = 0; i < totalV; ++i) fin >> src_p2v[i];
+        GraphReorder_vp({}, src_p2v);
+    }
+
+    IndexLoad(graphName + "_" + srcOrder + ".bin");
+
+    {
+        ifstream fin(graphName + "_" + tgtOrder + ".order");
+        if (!fin.is_open()) {
+            cout << "Cannot open " << tgtOrder << " order file!" << endl;
+            return;
+        }
+        vector<int> tgt_p2v(totalV);
+        for (int i = 0; i < totalV; ++i) fin >> tgt_p2v[i];
+
+        double t = omp_get_wtime();
+        GraphReorder_vp({}, tgt_p2v);
+        cout << "Graph reorder time: " << omp_get_wtime() - t << " s" << endl;
+
+        t = omp_get_wtime();
+        IndexReorder();
+        cout << "Index reorder time: " << omp_get_wtime() - t << " s" << endl;
+    }
+
+    std::cout << "q = " << Query(24905, 162158) << std::endl;
+
+    ArrayOnHeap<vector<unsigned> > reorderLabel = std::move(label);
+    ArrayOnHeap<vector<int> > reorderPos = std::move(pos);
+
+    IndexLoad(graphName + "_" + tgtOrder + ".bin");
+
+    bool labelOk = true;
+    int mismatchCnt = 0;
+    for (int u = 0; u < totalV && mismatchCnt < 10; ++u) {
+        if (label[u].size() != reorderLabel[u].size()) {
+            cout << "label size mismatch at u=" << u << " target=" << label[u].size()
+                 << " reorder=" << reorderLabel[u].size() << endl;
+
+            cout << "  target  L[" << u << "] = ";
+            for (int j = 0; j < (int)label[u].size(); ++j)
+                cout << "(" << (label[u][j] >> MAXMOV) << "," << (label[u][j] & MASK) << ") ";
+            cout << endl;
+
+            cout << "  reorder L[" << u << "] = ";
+            for (int j = 0; j < (int)reorderLabel[u].size(); ++j)
+                cout << "(" << (reorderLabel[u][j] >> MAXMOV) << "," << (reorderLabel[u][j] & MASK) << ") ";
+            cout << endl;
+
+            labelOk = false;
+            ++mismatchCnt;
+            continue;
+        }
+        for (int j = 0; j < (int)label[u].size(); ++j) {
+            if (label[u][j] != reorderLabel[u][j]) {
+                cout << "label mismatch at u=" << u << " j=" << j << " target=(" << (label[u][j] >> MAXMOV) << ","
+                     << (label[u][j] & MASK) << ")"
+                     << " reorder=(" << (reorderLabel[u][j] >> MAXMOV) << "," << (reorderLabel[u][j] & MASK) << ")"
+                     << endl;
+                labelOk = false;
+                ++mismatchCnt;
+                break;
+            }
+        }
+    }
+
+    bool posOk = PosCheck(reorderLabel.data(), reorderPos.data());
+
+    cout << "label check (" << srcOrder << " -> " << tgtOrder << "): " << (labelOk ? "PASS" : "FAIL") << endl;
+    cout << "pos   check (" << srcOrder << " -> " << tgtOrder << "): " << (posOk ? "PASS" : "FAIL") << endl;
+
+    cout << "=== TestOrderReorder Done ===" << endl;
 }
 
 int main(int argc, char** argv) {
@@ -1852,6 +2029,18 @@ int main(int argc, char** argv) {
         cout << "Update time:  " << omp_get_wtime() - t << " s" << endl;
 
         TestReorder();
+    } else if (program_choice == 7) {
+        cout << "Build indexes from different p2v orders ......" << std::endl;
+        OrderBuild(StripExt(Graphpath));
+    } else if (program_choice == 8) {
+        cout << "Test reordering between different p2v orders ......" << std::endl;
+        std::string graphName = StripExt(Graphpath);
+        TestOrderReorder(graphName, "d", "b");
+        TestOrderReorder(graphName, "d", "s");
+        TestOrderReorder(graphName, "b", "d");
+        TestOrderReorder(graphName, "b", "s");
+        TestOrderReorder(graphName, "s", "d");
+        TestOrderReorder(graphName, "s", "b");
     }
 
     return 0;
