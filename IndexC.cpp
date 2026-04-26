@@ -429,6 +429,7 @@ void IndexBuild() {
     for (long long cnt = 1; cnt && dis <= MAXDIS; ++dis) {
         cnt = 0;
         ArrayOnHeap<vector<unsigned>> label_new(totalV);
+        double t1 = omp_get_wtime();
 #pragma omp parallel
         {
             int pid = omp_get_thread_num(), np = omp_get_num_threads();
@@ -447,7 +448,10 @@ void IndexBuild() {
 
                     for (int j = pos[w][dis - 2]; j < pos[w][dis - 1]; ++j) {
                         int v = label[w][j] >> MAXMOV;
-                        if (v >= u) break;
+                        if (v >= u) {
+                            break;
+                            // continue;
+                        }
 
                         if (!(used[v / 8] & (1 << (v % 8)))) {
                             used[v / 8] |= (1 << (v % 8)), cand.push_back(v);
@@ -477,7 +481,7 @@ void IndexBuild() {
                 cnt += local_cnt;
             }
         }
-
+        // double t2 = omp_get_wtime();
 #pragma omp parallel
         {
             int pid = omp_get_thread_num(), np = omp_get_num_threads();
@@ -491,8 +495,9 @@ void IndexBuild() {
                 pos[u].push_back(label[u].size());
             }
         }
+        double t3 = omp_get_wtime();
 
-        cout << "Distance: " << dis << "   Cnt: " << cnt << endl;
+        cout << "Distance: " << dis << "   Cnt: " << cnt << "time = " << t3 - t1 << endl;
     }
 }
 
@@ -1134,6 +1139,9 @@ void IndexReorder() {
 
     long long cur_cnt = 0, prev_cnt = 0;
     std::cout << "=== Reorder starts ===" << std::endl;
+
+    double t1 = omp_get_wtime();
+
     for (int dis = 1; dis <= reorderMaxDis; ++dis) {
 #pragma omp parallel
         {
@@ -1151,12 +1159,12 @@ void IndexReorder() {
 
                 int pla1 = (dis - 1 < pos[u].size()) ? pos[u][dis - 1] : label[u].size();
                 int pla2 = dis < pos[u].size() ? pos[u][dis] : label[u].size();
-
                 for (int i = pla1; i < pla2; ++i) {
                     int v = label[u][i] >> MAXMOV;
                     nowIndex[v] = i;
-                    if (v > u) {  //* v没有u重要，删除该label
-                        local_bad_inv.push_back({v, ((unsigned)u << MAXMOV) | (unsigned)dis});
+                    // assert(v > u);
+                    if (v > u) {                                           //* v没有u重要，删除该label
+                        bad_inv_labels[v].push_back((u << MAXMOV) | dis);  // TODO: need locking
                         deleteIndexes[u].push_back(i);
                         if (!used[v]) {
                             used[v] = true;
@@ -1201,7 +1209,7 @@ void IndexReorder() {
 #pragma omp critical
             {
                 cur_cnt += local_cnt;
-                for (auto& [v, data] : local_bad_inv) bad_inv_labels[v].push_back(data);
+                // for (auto& [v, data] : local_bad_inv) bad_inv_labels[v].push_back(data);
             }
         }
 #pragma omp parallel
@@ -1228,29 +1236,34 @@ void IndexReorder() {
     DBG_LOG("C", "IndexReorder:afterRemovingLoop", "removing loop done", "\"data\":{}");
     // #endregion
 
+    double t2 = omp_get_wtime();
+    std::cout << "get delete =" << t2 - t1 << "s" << std::endl;
+
     //* 删除不需要的index
+    size_t total_deleted_cnt = 0;
 #pragma omp parallel
     {
         int pid = omp_get_thread_num(), np = omp_get_num_threads();
+        size_t local_deleted_cnt = 0;
         for (int u = pid; u < totalV; u += np) {
+            local_deleted_cnt += deleteIndexes[u].size();
             if (deleteIndexes[u].empty()) continue;
 
             sort(deleteIndexes[u].begin(), deleteIndexes[u].end());
+            vaff[u] = deleteIndexes[u][0];
 
-            vector<unsigned> newLabel;
-            newLabel.reserve(label[u].size() - deleteIndexes[u].size());
-            int di = 0;
-            for (int i = 0; i < (int)label[u].size(); ++i) {
-                if (di < (int)deleteIndexes[u].size() && deleteIndexes[u][di] == (size_t)i) {
+            size_t write = 0, di = 0, delN = deleteIndexes[u].size();
+            for (size_t i = 0; i < label[u].size(); ++i) {
+                if (di < delN && deleteIndexes[u][di] == i) {
                     ++di;
                 } else {
-                    newLabel.push_back(label[u][i]);
+                    label[u][write++] = label[u][i];
                 }
             }
-
-            label[u] = std::move(newLabel);
+            label[u].resize(write);
 
             pos[u].clear();
+            if (label[u].empty()) continue;
             int maxDisOnU = label[u].back() & MASK;
             size_t tail = 0;
             for (int d = 0; d < maxDisOnU; ++d) {
@@ -1259,7 +1272,14 @@ void IndexReorder() {
                 if (tail == label[u].size()) break;
             }
         }
+#pragma omp critical
+        {
+            total_deleted_cnt += local_deleted_cnt;
+        }
     }
+    double t3 = omp_get_wtime();
+    std::cout << "deleting =" << t3 - t2 << "s, total delete = " << total_deleted_cnt << std::endl;
+
     // for (int u = 0; u < totalV; ++u) {
     //     int prev = 0;
     //     for (int d = 0; d < (int)pos[u].size(); ++d) {
@@ -1287,21 +1307,26 @@ void IndexReorder() {
     //* ====================== inserting part ===========================
     ArrayOnHeap<int> badLabelTail(totalV);
 
-    ArrayOnHeap<vector<unsigned>> new_label(totalV);
+    // ArrayOnHeap<vector<unsigned>> new_label(totalV);
 
+    size_t total_new_cnt = 0;
     cur_cnt = 0, prev_cnt = 0;
+
     for (unsigned dis = 1; dis <= reorderMaxDis || prev_cnt != 0; ++dis) {
+        long long cand_size = 0, enum_size = 0;
+        double t1 = omp_get_wtime();
 #pragma omp parallel
         {
             int pid = omp_get_thread_num(), np = omp_get_num_threads();
             // int pid = 0, np = 1;
-            long long local_cnt = 0;
+            long long local_cnt = 0, local_cand_size = 0, local_enum_size = 0, local_prev = 0, local_bad = 0;
             ArrayOnHeap<bool> used(totalV);
             ArrayOnHeap<char> nowdis(totalV, ArrayOnHeap<char>::uninitialized);
             nowdis.memset(-1);
+            vector<int> cand;
 
             for (int u = pid; u < totalV; u += np) {
-                vector<int> cand;
+                cand.clear();
                 //* add bad labels of current dis into cand
                 while (badLabelTail[u] != bad_inv_labels[u].size() &&
                        (bad_inv_labels[u][badLabelTail[u]] & MASK) <= dis) {
@@ -1311,9 +1336,10 @@ void IndexReorder() {
                         used[v] = true;
                         cand.push_back(v);
                     } else {
-                        assert(0);
+                        // assert(0);
                     }
                     ++badLabelTail[u];
+                    ++local_bad;
                 }
 
                 int pla1 = dis < pos[u].size() ? pos[u][dis] : label[u].size();
@@ -1327,12 +1353,17 @@ void IndexReorder() {
                     for (int w : con[u]) {
                         for (unsigned l : prev_mod_labels[w]) {
                             int v = l >> MAXMOV;
-                            assert((l & MASK) == dis - 1);
-                            if (v < u && !used[v]) {
+                            if (v >= u) {
+                                // break;
+                                continue;
+                            }
+                            // assert((l & MASK) == dis - 1);
+                            if (!used[v]) {
                                 used[v] = true;
                                 cand.push_back(v);
                             }
                         }
+                        local_prev += prev_mod_labels[w].size();
                     }
                     for (size_t i = pla1; i < pla2; ++i) {
                         used[label[u][i] >> MAXMOV] = false;
@@ -1341,60 +1372,105 @@ void IndexReorder() {
 
                 if (cand.size() == 0) continue;
 
+                // std::cout << "dis = " << dis << ", cand size = " << cand.size() << std::endl;
+                local_cand_size += cand.size();
+
                 for (int i = 0; i < pla1; ++i) {  // 便于判断
                     if ((label[u][i] >> MAXMOV) > u) continue;
                     nowdis[label[u][i] >> MAXMOV] = label[u][i] & MASK;
                 }
-                for (unsigned l : new_label[u]) {
-                    if ((l >> MAXMOV) > u) continue;
-                    nowdis[l >> MAXMOV] = l & MASK;
-                }
+                // for (unsigned l : new_label[u]) {
+                //     if ((l >> MAXMOV) > u) continue;
+                //     nowdis[l >> MAXMOV] = l & MASK;
+                // }
 
-                auto can_update_delete_with_new = [u, &nowdis, &new_label](int v, int dis) {
+                auto can_update_delete_with_new = [&](int v, int dis) {
                     int pla1 = dis < pos[v].size() ? pos[v][dis] : label[v].size();
+                    bool ok = false;
                     for (int i = 0; i < pla1; ++i) {
                         int w = label[v][i] >> MAXMOV, d = label[v][i] & MASK;
-                        assert(w <= v);
+                        if (d >= dis) {
+                            ok = true;
+                            local_enum_size += i + 1;
+                            break;
+                        }
                         if (nowdis[w] >= 0 && nowdis[w] + d <= dis) {
+                            // if (u == 1756 && v == 1217 && dis == 3) {
+                            //     std::cout << "WA: prune hub = " << w << ", dis = " << d << std::endl;
+                            // }
                             return false;
                         }
                     }
-                    for (unsigned newL : new_label[v]) {
-                        int w = newL >> MAXMOV, d = newL & MASK;
-                        assert(w <= v);
-                        if (nowdis[w] >= 0 && nowdis[w] + d <= dis) {
-                            return false;
-                        }
-                    }
+                    if (!ok) local_enum_size += pla1;
+                    // ok = false;
+                    // for (int i = 0; i < (int)new_label[v].size(); ++i) {
+                    //     int w = new_label[v][i] >> MAXMOV, d = new_label[v][i] & MASK;
+                    //     if (d >= dis) {
+                    //         ok = true;
+                    //         local_enum_size += i + 1;
+                    //         break;
+                    //     }
+                    //     if (nowdis[w] >= 0 && nowdis[w] + d <= dis) {
+                    //         return false;
+                    //     }
+                    // }
+                    // if (!ok) local_enum_size += new_label[v].size();
+
                     return true;
                 };
 
-                // sort(cand.begin(), cand.end());
-
-                size_t old_size = new_label[u].size();
                 for (int i = 0; i < (int)cand.size(); ++i) {
                     used[cand[i]] = 0;
-                    if (can_update_delete_with_new(cand[i], dis)) {
+                    if (vaff[cand[i]] == -1 && (vaff[u] == -1 || vaff[u] > cand[i])) continue;
+                    if (nowdis[cand[i]] == -1 && can_update_delete_with_new(cand[i], dis)) {
                         // cout<<"id: "<<u<<"  v_"<<cand[i]<<endl;
                         ++local_cnt;
                         unsigned labelU = (((unsigned)cand[i]) << MAXMOV) | (unsigned)dis;
                         cur_mod_labels[u].push_back(labelU);
-                        new_label[u].push_back(labelU);
                     }
                 }
-                std::sort(new_label[u].begin() + old_size, new_label[u].end());
 
                 for (int i = 0; i < pla1; ++i)  // 便于判断
                     nowdis[label[u][i] >> MAXMOV] = -1;
-                for (unsigned l : new_label[u]) {
-                    nowdis[l >> MAXMOV] = -1;
+                // for (unsigned l : new_label[u]) {
+                //     nowdis[l >> MAXMOV] = -1;
+                // }
+
+                std::sort(cur_mod_labels[u].begin(), cur_mod_labels[u].end());
+                // new_label[u].insert(new_label[u].end(), cur_mod_labels[u].begin(), cur_mod_labels[u].end());
+                if (!cur_mod_labels[u].empty()) {
+                    vector<unsigned>& lab = label[u];
+                    vector<int>& pp = pos[u];
+                    int insert_pos = pla1;
+                    int delta = (int)cur_mod_labels[u].size();
+
+                    while (pp.size() < dis) {
+                        pp.push_back(lab.size());
+                    }
+
+                    lab.insert(lab.begin() + insert_pos, cur_mod_labels[u].begin(), cur_mod_labels[u].end());
+                    // assert((lab[pos[u][dis - 1]] & MASK) == dis && (lab[insert_pos + delta - 1] & MASK) == dis);
+                    // assert(pos[u][dis - 1] == 0 || ((lab[pos[u][dis - 1] - 1] & MASK) < dis));
+                    // assert(insert_pos + delta == lab.size() || ((lab[insert_pos + delta] & MASK) > dis));
+                    std::sort(lab.begin() + pos[u][dis - 1], lab.begin() + insert_pos + delta);
+                    if ((size_t)dis < pp.size()) {
+                        for (size_t ii = dis; ii < pp.size(); ++ii) pp[ii] += delta;
+                    } else {
+                        assert(pp.size() == dis);
+                        pp.push_back((int)lab.size());
+                    }
                 }
             }
-            // #pragma omp critical
+#pragma omp critical
             {
                 cur_cnt += local_cnt;
+                cand_size += local_cand_size;
+                enum_size += local_enum_size;
+                std::cout << "local prev = " << local_prev << ", local bad = " << local_bad << std::endl;
             }
         }
+        double t2 = omp_get_wtime();
+        total_new_cnt += cur_cnt;
 
 #pragma omp parallel
         {
@@ -1404,7 +1480,10 @@ void IndexReorder() {
                 cur_mod_labels[u] = std::vector<unsigned>();
             }
         }
-        std::cout << "Distance: " << dis << "  Insert Cnt: " << cur_cnt << endl;
+        double t3 = omp_get_wtime();
+        std::cout << "Distance: " << dis << "  Insert Cnt: " << cur_cnt << " Cand size = " << cand_size
+                  << " Enum label cnt = " << enum_size << "time = " << t2 - t1 << " " << t3 - t2 << " " << t3 - t1
+                  << endl;
 
         // #region agent log
         DBG_LOG("C", "IndexReorder:inserting", "end of insert dis", "\"data\":{\"dis\":%u,\"cur_cnt\":%lld}", dis,
@@ -1414,12 +1493,17 @@ void IndexReorder() {
         prev_cnt = cur_cnt;
         cur_cnt = 0;
     }
+    double t4 = omp_get_wtime();
+    std::cout << "insert = " << t4 - t3 << "s, total new cnt = " << total_new_cnt << std::endl;
 
     // #region agent log
     DBG_LOG("C", "IndexReorder:afterInsertLoop", "insert loop done, merging", "\"data\":{}");
     // #endregion
 
-    merge_labels(new_label);
+    // merge_labels(new_label);
+
+    // double t5 = omp_get_wtime();
+    // std::cout << "merge = " << t5 - t4 << "s" << std::endl;
 
     // #region agent log
     DBG_LOG("C", "IndexReorder:done", "IndexReorder fully complete", "\"data\":{}");
@@ -2135,6 +2219,9 @@ void TestOrderReorder(string graphName, string srcOrder, string tgtOrder) {
     }
 
     IndexLoad(graphName + "_" + srcOrder + ".bin");
+    long long srcIndexLabelCnt = 0;
+    for (int u = 0; u < totalV; ++u) srcIndexLabelCnt += (long long)label[u].size();
+    cout << "src index label count = " << srcIndexLabelCnt << endl;
 
     // #region agent log
     DBG_LOG("E", "TestOrderReorder:afterSrcLoad", "src index loaded", "\"data\":{\"src\":\"%s\",\"tgt\":\"%s\"}",
@@ -2175,6 +2262,9 @@ void TestOrderReorder(string graphName, string srcOrder, string tgtOrder) {
     ArrayOnHeap<vector<int>> reorderPos = std::move(pos);
 
     IndexLoad(graphName + "_" + tgtOrder + ".bin");
+    long long tgtIndexLabelCnt = 0;
+    for (int u = 0; u < totalV; ++u) tgtIndexLabelCnt += (long long)label[u].size();
+    cout << "tgt index label count = " << tgtIndexLabelCnt << endl;
 
     // #region agent log
     DBG_LOG("E", "TestOrderReorder:afterTgtLoad", "tgt index loaded for comparison",
@@ -2387,11 +2477,14 @@ int main(int argc, char** argv) {
         double t = omp_get_wtime();
 
         Insert_Parallel();
+        double t1 = omp_get_wtime();
 
         Insert_Remove_Parall();
-        // Insert_Remove_Parall_no_prune();
+        double t2 = omp_get_wtime();
+
         merge_labels(clab);
-        cout << "Update time:  " << omp_get_wtime() - t << " s" << endl;
+        double t3 = omp_get_wtime();
+        cout << "Update time:  " << t3 - t << " s, " << t1 - t << " " << t2 - t1 << " " << t3 - t2 << endl;
 
         check_label_validity("program9_after_insert_remove");
         ArrayOnHeap<std::vector<unsigned>> updateLabel = std::move(label);
