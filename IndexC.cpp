@@ -18,10 +18,12 @@
 #include <random>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "ArrayOnHeap.hpp"
+#include "DynamicEdgeReader.hpp"
 
 // #region agent log
 #include <cstdio>
@@ -446,7 +448,9 @@ void IndexBuild() {
                 for (int i = 0; i < con[u].size(); ++i) {
                     int w = con[u][i];
 
-                    for (int j = pos[w][dis - 2]; j < pos[w][dis - 1]; ++j) {
+                    int pp1 = (dis - 2 < pos[w].size()) ? pos[w][dis - 2] : label[w].size();
+                    int pp2 = (dis - 1 < pos[w].size()) ? pos[w][dis - 1] : label[w].size();
+                    for (int j = pp1; j < pp2; ++j) {
                         int v = label[w][j] >> MAXMOV;
                         if (v >= u) {
                             break;
@@ -647,7 +651,9 @@ void labelCheck() {
         vector<unsigned>& lab = label[i];
 
         for (int dd = 1; dd < dis; ++dd) {
-            for (int pp = pos[i][dd - 1]; pp < pos[i][dd] - 1; ++pp) {
+            int pp1 = (dd - 1 < pos[i].size()) ? pos[i][dd - 1] : label[i].size();
+            int pp2 = (dd < pos[i].size()) ? pos[i][dd] : label[i].size();
+            for (int pp = pp1; pp < pp2 - 1; ++pp) {
                 unsigned v1 = lab[pp] >> MAXMOV, d1 = lab[pp] & MASK;
                 unsigned v2 = lab[pp + 1] >> MAXMOV, d2 = lab[pp + 1] & MASK;
 
@@ -659,7 +665,8 @@ void labelCheck() {
     for (int i = 0; i < totalV; ++i) {
         vector<unsigned>& lab = label[i];
         for (int dd = 1; dd < dis; ++dd)
-            for (int pp = pos[i][dd - 1]; pp < pos[i][dd]; ++pp) {
+            for (int pp = (dd - 1 < pos[i].size()) ? pos[i][dd - 1] : label[i].size();
+                 pp < ((dd < pos[i].size()) ? pos[i][dd] : label[i].size()); ++pp) {
                 unsigned v1 = lab[pp] >> MAXMOV, d1 = lab[pp] & MASK;
                 if (d1 != dd) cout << "error!" << endl;
             }
@@ -675,7 +682,8 @@ int CurDis(unsigned src, unsigned tgt, unsigned dcur) {
 
         if (vid < src) continue;
 
-        int pla1 = dcur == 1 ? 0 : pos[vid][dcur - 2], pla2 = pos[vid][dcur - 1];
+        int pla1 = dcur == 1 ? 0 : ((dcur - 2 < pos[vid].size()) ? pos[vid][dcur - 2] : label[vid].size()),
+            pla2 = (dcur - 1 < pos[vid].size()) ? pos[vid][dcur - 1] : label[vid].size();
 
         for (int j = pla1; j < pla2; ++j)
             if (label[vid][j] == elem) return 1;
@@ -736,11 +744,101 @@ void DeleteGraph(float cc) {
 }
 
 void DeleteEdge(int vid, int adj) {
+    assert(vid != adj);
     conD[vid].push_back(adj);  // for the index update
     conD[adj].push_back(vid);
 
+    assert(*std::lower_bound(con[vid].begin(), con[vid].end(), adj) == adj);
+    assert(*std::lower_bound(con[adj].begin(), con[adj].end(), vid) == vid);
+
     con[vid].erase(remove(con[vid].begin(), con[vid].end(), adj), con[vid].end());
     con[adj].erase(remove(con[adj].begin(), con[adj].end(), vid), con[adj].end());
+}
+
+void RandomAddDeleteByDegree(int p, int q, std::vector<std::pair<int, int>>& addEdges,
+                             std::vector<std::pair<int, int>>& delEdges) {
+    addEdges.clear();
+    delEdges.clear();
+    if (totalV <= 1) return;
+
+    std::mt19937 rng((unsigned)time(NULL));
+    std::uniform_int_distribution<int> pickU(0, totalV - 1);
+    std::vector<std::vector<unsigned>> tempCon = con;
+    std::uniform_real_distribution<double> factorDist(1.5, 3.0);
+    auto insert_sorted_unique = [](std::vector<unsigned>& edges, unsigned v) {
+        auto it = std::lower_bound(edges.begin(), edges.end(), v);
+        if (it == edges.end() || *it != v) edges.insert(it, v);
+    };
+
+    int addCnt = 0;
+    int addNoProgressRounds = 0;
+    while (addCnt < p && addNoProgressRounds < totalV) {
+        int u = pickU(rng);
+        int beforeAddCnt = addCnt;
+
+        int oldDeg = (int)tempCon[u].size();
+        if (oldDeg > 0 && oldDeg < totalV - 1) {
+            double addFactor = factorDist(rng);
+            int targetDeg = std::min(totalV - 1, (int)std::ceil(oldDeg * addFactor));
+            int needAdd = targetDeg - (int)tempCon[u].size();
+            int allowedAdd = std::min(needAdd, p - addCnt);
+
+            std::unordered_set<int> sampled;
+            sampled.reserve((size_t)totalV);
+            std::uniform_int_distribution<int> pickV(0, totalV - 1);
+            while (allowedAdd > 0 && sampled.size() < (size_t)(totalV - 1)) {
+                int v = pickV(rng);
+                if (v == u) continue;
+                if (!sampled.insert(v).second) continue;
+                if (std::binary_search(tempCon[u].begin(), tempCon[u].end(), (unsigned)v)) continue;
+
+                addEdges.emplace_back(u, v);
+                insert_sorted_unique(tempCon[v], (unsigned)u);
+                insert_sorted_unique(tempCon[u], (unsigned)v);
+                ++addCnt;
+                --allowedAdd;
+            }
+        }
+
+        if (addCnt == beforeAddCnt)
+            ++addNoProgressRounds;
+        else
+            addNoProgressRounds = 0;
+    }
+
+    int delCnt = 0;
+    int delNoProgressRounds = 0;
+    while (delCnt < q && delNoProgressRounds < totalV) {
+        int u = pickU(rng);
+        int beforeDelCnt = delCnt;
+
+        int oldDeg = (int)tempCon[u].size();
+        if (oldDeg > 1) {
+            double delFactor = factorDist(rng);
+            int targetDeg = (int)std::floor(oldDeg / delFactor);
+            int needDel = (int)tempCon[u].size() - targetDeg;
+            int allowedDel = std::min(needDel, q - delCnt);
+            if (allowedDel > 0) {
+                std::vector<unsigned> neigh = tempCon[u];
+                std::shuffle(neigh.begin(), neigh.end(), rng);
+                for (unsigned v : neigh) {
+                    if (allowedDel <= 0) break;
+                    if (!std::binary_search(tempCon[u].begin(), tempCon[u].end(), v)) continue;
+
+                    delEdges.emplace_back(u, (int)v);
+                    tempCon[u].erase(std::remove(tempCon[u].begin(), tempCon[u].end(), v), tempCon[u].end());
+                    tempCon[v].erase(std::remove(tempCon[v].begin(), tempCon[v].end(), (unsigned)u), tempCon[v].end());
+                    --allowedDel;
+                    ++delCnt;
+                }
+            }
+        }
+
+        if (delCnt == beforeDelCnt)
+            ++delNoProgressRounds;
+        else
+            delNoProgressRounds = 0;
+    }
 }
 
 void IndexDel_Parallel() {  // 并行删除error label
@@ -756,7 +854,7 @@ void IndexDel_Parallel() {  // 并行删除error label
         cnt = 0;
         ArrayOnHeap<vector<unsigned>> label_new(totalV);
 
-#pragma omp parallel
+        // #pragma omp parallel
         {
             int pid = omp_get_thread_num(), np = omp_get_num_threads();
             long long local_cnt = 0;
@@ -769,7 +867,7 @@ void IndexDel_Parallel() {  // 并行删除error label
             for (int u = pid; u < totalV; u += np) {
                 cand.clear();
 
-                int n_cand = 0, pla1 = pos[u][dis - 1];
+                int n_cand = 0, pla1 = (dis - 1 < pos[u].size()) ? pos[u][dis - 1] : label[u].size();
                 int pla2 = dis < pos[u].size() ? pos[u][dis] : label[u].size();
 
                 for (int i = pla1; i < pla2; ++i) nowdis[label[u][i] >> MAXMOV] = dis;
@@ -798,7 +896,8 @@ void IndexDel_Parallel() {  // 并行删除error label
 
                     int w = conD[u][i];
 
-                    int pp1 = dis == 1 ? 0 : pos[w][dis - 2], pp2 = pos[w][dis - 1];
+                    int pp1 = dis == 1 ? 0 : ((dis - 2 < pos[w].size()) ? pos[w][dis - 2] : label[w].size()),
+                        pp2 = (dis - 1 < pos[w].size()) ? pos[w][dis - 1] : label[w].size();
 
                     for (int j = pp1; j < pp2; ++j) {
                         int v = label[w][j] >> MAXMOV;
@@ -898,11 +997,13 @@ void IndexDel_Add() {
 
     clab = ArrayOnHeap<vector<unsigned>>(totalV);
 
-#pragma omp parallel
+    // #pragma omp parallel
     {
         int pid = omp_get_thread_num(), np = omp_get_num_threads();
         for (int u = pid; u < totalV; u += np) {
-            for (int i = pos[u][0]; i < pos[u][1]; ++i) {
+            int pla0 = (0 < pos[u].size()) ? pos[u][0] : label[u].size(),
+                pla1 = (1 < pos[u].size()) ? pos[u][1] : label[u].size();
+            for (int i = pla0; i < pla1; ++i) {
                 unsigned vid = label[u][i] >> MAXMOV;
 
                 if (vaff[vid] == -1) continue;
@@ -948,7 +1049,9 @@ void IndexDel_Add() {
 
                     if (vaff[u] != -1) {  // vaff点需要遍历更多的候选label
 
-                        for (int j = pos[w][dis - 2]; j < pos[w][dis - 1]; ++j) {
+                        int pp1 = (dis - 2 < pos[w].size()) ? pos[w][dis - 2] : label[w].size();
+                        int pp2 = (dis - 1 < pos[w].size()) ? pos[w][dis - 1] : label[w].size();
+                        for (int j = pp1; j < pp2; ++j) {
                             int v = label[w][j] >> MAXMOV;
 
                             if (v >= u) break;  // rank 剪枝
@@ -1452,7 +1555,8 @@ void IndexReorder() {
                     // assert((lab[pos[u][dis - 1]] & MASK) == dis && (lab[insert_pos + delta - 1] & MASK) == dis);
                     // assert(pos[u][dis - 1] == 0 || ((lab[pos[u][dis - 1] - 1] & MASK) < dis));
                     // assert(insert_pos + delta == lab.size() || ((lab[insert_pos + delta] & MASK) > dis));
-                    std::sort(lab.begin() + pos[u][dis - 1], lab.begin() + insert_pos + delta);
+                    int sort_pos = (dis - 1 < pp.size()) ? pp[dis - 1] : (int)lab.size();
+                    std::sort(lab.begin() + sort_pos, lab.begin() + insert_pos + delta);
                     if ((size_t)dis < pp.size()) {
                         for (size_t ii = dis; ii < pp.size(); ++ii) pp[ii] += delta;
                     } else {
@@ -1521,10 +1625,30 @@ void Einsert(unsigned vid, vector<unsigned>& edges) {
         }
     }
 
-    if (pla == -1)
+    if (pla == -1) {
+        // if (!edges.empty()) {
+        //     assert(edges.back() < vid);
+        // }
         edges.emplace_back(vid);
-    else
+    } else {
+        // assert(pla == 0 || edges[pla - 1] < vid);
         edges.emplace(edges.begin() + pla, vid);
+    }
+}
+
+void InsertEdge(int u, int v) {
+    // if (u == 5629 && v == 7606) {
+    //     std::cout << "i " << u << " " << v << std::endl;
+    // }
+    assert(u != v);
+    Einsert(u, conD[v]);
+    Einsert(v, conD[u]);
+    auto it = std::lower_bound(con[v].begin(), con[v].end(), u);
+    assert(it == con[v].end() || *it != u);
+    Einsert(u, con[v]);
+    auto vit = std::lower_bound(con[u].begin(), con[u].end(), v);
+    assert(vit == con[u].end() || *vit != v);
+    Einsert(v, con[u]);
 }
 
 void InsertGraph(float cc) {
@@ -1541,11 +1665,12 @@ void InsertGraph(float cc) {
         if (it == con[vid].end()) {
             // cout<<vid<<"  "<<adj<<endl;
 
-            Einsert(vid, conD[adj]);
-            Einsert(adj, conD[vid]);
+            // Einsert(vid, conD[adj]);
+            // Einsert(adj, conD[vid]);
 
-            Einsert(vid, con[adj]);
-            Einsert(adj, con[vid]);
+            // Einsert(vid, con[adj]);
+            // Einsert(adj, con[vid]);
+            InsertEdge(vid, adj);
         }
 
         cnt += 1;
@@ -1608,7 +1733,8 @@ void DynamicFile(int flg) {
 int DisVerdict(unsigned w, unsigned dmax, vector<int>& nowDis) {
     // find a single path between tgt and w, where d<=dmax, return 1
 
-    for (int i = 0; i < pos[w][dmax]; ++i) {
+    int pla = (dmax < pos[w].size()) ? pos[w][dmax] : label[w].size();
+    for (int i = 0; i < pla; ++i) {
         unsigned vid = label[w][i] >> MAXMOV, dis = label[w][i] & MASK;
 
         if (nowDis[vid] == -1) continue;
@@ -1623,7 +1749,9 @@ int ifdelete(unsigned tgt, unsigned tdis, unsigned v, unsigned vdis) {  // remov
     int flg = -1;
     vector<int> vec(totalV, -1);
 
-    for (int i = 0; i < pos[tgt][tdis - vdis]; ++i) vec[(label[tgt][i] >> MAXMOV)] = (label[tgt][i] & MASK);
+    unsigned targetDis = tdis - vdis;
+    int pla = (targetDis < pos[tgt].size()) ? pos[tgt][targetDis] : label[tgt].size();
+    for (int i = 0; i < pla; ++i) vec[(label[tgt][i] >> MAXMOV)] = (label[tgt][i] & MASK);
 
     for (int i = 0; i < clab[tgt].size(); ++i) vec[clab[tgt][i]] = vdis;  // 可以起到覆盖作用
 
@@ -1690,7 +1818,9 @@ void Insert_Parallel() {
                 for (int i = 0; i < con[u].size(); ++i) {
                     int w = con[u][i];
 
-                    for (int j = cpos[w][dis - 2]; j < cpos[w][dis - 1]; ++j) {
+                    int cp1 = (dis - 2 < cpos[w].size()) ? cpos[w][dis - 2] : clab[w].size();
+                    int cp2 = (dis - 1 < cpos[w].size()) ? cpos[w][dis - 1] : clab[w].size();
+                    for (int j = cp1; j < cp2; ++j) {
                         int v = clab[w][j] >> MAXMOV;
 
                         if (v >= u) break;
@@ -1705,7 +1835,9 @@ void Insert_Parallel() {
                     for (int i = 0; i < conD[u].size(); ++i) {
                         int w = conD[u][i];
 
-                        for (int j = pos[w][dis - 2]; j < pos[w][dis - 1]; ++j) {
+                        int pp1 = (dis - 2 < pos[w].size()) ? pos[w][dis - 2] : label[w].size();
+                        int pp2 = (dis - 1 < pos[w].size()) ? pos[w][dis - 1] : label[w].size();
+                        for (int j = pp1; j < pp2; ++j) {
                             int v = label[w][j] >> MAXMOV;
 
                             if (v >= u) break;
@@ -1719,8 +1851,8 @@ void Insert_Parallel() {
                 if (cand.size() == 0) continue;
 
                 int n_cand = 0;
-                int pla1 = dis < pos[0].size() ? pos[u][dis] : label[u].size();
-                int cla1 = dis < cpos[0].size() ? cpos[u][dis] : clab[u].size();
+                int pla1 = dis < pos[u].size() ? pos[u][dis] : label[u].size();
+                int cla1 = dis < cpos[u].size() ? cpos[u][dis] : clab[u].size();
 
                 for (int i = 0; i < pla1; ++i) nowdis[label[u][i] >> MAXMOV] = label[u][i] & MASK;
 
@@ -1864,7 +1996,8 @@ void Insert_Remove_Parall() {
 
             // ==========================================
 
-            for (int i = pos[u][0]; i < label[u].size(); ++i) {  // dis=0,1的label不需要check
+            int pla0 = (0 < pos[u].size()) ? pos[u][0] : label[u].size();
+            for (int i = pla0; i < label[u].size(); ++i) {  // dis=0,1的label不需要check
 
                 unsigned vid = label[u][i] >> MAXMOV, dis = label[u][i] & MASK;
 
@@ -2014,6 +2147,30 @@ bool LabelsEqual(const ArrayOnHeap<vector<unsigned>>* lhs, const ArrayOnHeap<vec
     return true;
 }
 
+void build_pos_from_label() {
+    for (int u = 0; u < totalV; ++u) {
+        std::vector<int> newPos;
+        unsigned prevDis = 0;
+        for (int k = 0; k < (int)label[u].size(); ++k) {
+            unsigned d = label[u][k] & MASK;
+            while (prevDis < d) {
+                newPos.push_back(k);
+                ++prevDis;
+            }
+        }
+        newPos.push_back((int)label[u].size());
+        // if (newPos != pos[u]) {
+        //     cout << "[check_label_validity] mismatch at u=" << u << " newPos: ";
+        //     for (int x : newPos) cout << x << " ";
+        //     cout << " | pos[u]: ";
+        //     for (int x : pos[u]) cout << x << " ";
+        //     cout << endl;
+        //     assert(0);
+        // }
+        pos[u] = std::move(newPos);
+    }
+}
+
 bool check_label_validity(const char* stage) {
     if (label.empty() || pos.empty()) {
         cout << "[check_label_validity] " << stage << " skip: label/pos is empty" << endl;
@@ -2050,6 +2207,10 @@ bool check_label_validity(const char* stage) {
         for (int i = 1; i < (int)label[u].size(); ++i) {
             unsigned prevDis = label[u][i - 1] & MASK;
             unsigned curDis = label[u][i] & MASK;
+            if ((label[u][i - 1] >> MAXMOV) == (label[u][i] >> MAXMOV)) {
+                cerr << "[check_label_validity] " << stage << " duplicate label, u=" << u << ", i=" << i
+                     << ", hub=" << (label[u][i] >> MAXMOV) << endl;
+            }
             if (curDis < prevDis) {
                 cerr << "[check_label_validity] " << stage << " label distance not nondecreasing, u=" << u
                      << ", i=" << i << ", prevDis=" << prevDis << ", curDis=" << curDis << endl;
@@ -2058,49 +2219,13 @@ bool check_label_validity(const char* stage) {
         }
     }
 
-    for (int u = 0; u < totalV; ++u) {
-        std::vector<int> newPos;
-        unsigned prevDis = 0;
-        for (int k = 0; k < (int)label[u].size(); ++k) {
-            unsigned d = label[u][k] & MASK;
-            while (prevDis < d) {
-                newPos.push_back(k);
-                ++prevDis;
-            }
-        }
-        newPos.push_back((int)label[u].size());
-        // if (newPos != pos[u]) {
-        //     cout << "[check_label_validity] mismatch at u=" << u << " newPos: ";
-        //     for (int x : newPos) cout << x << " ";
-        //     cout << " | pos[u]: ";
-        //     for (int x : pos[u]) cout << x << " ";
-        //     cout << endl;
-        //     assert(0);
-        // }
-        pos[u] = std::move(newPos);
-    }
+    build_pos_from_label();
+
     cout << "[check_label_validity] " << stage << " pos rebuilt from label" << endl;
     return ok;
 }
 
-void TestReorder() {
-    cout << "=== TestReorder ===" << endl;
-
-    GraphReorder();
-
-    double t = omp_get_wtime();
-    IndexReorder();
-    cout << "Reorder time:  " << omp_get_wtime() - t << " s" << endl;
-
-    ArrayOnHeap<vector<unsigned>> reorderLabel = std::move(label);
-    ArrayOnHeap<vector<int>> reorderPos = std::move(pos);
-
-    bool posOk = PosCheck(reorderLabel.data(), reorderPos.data());
-    cout << "pos check: " << (posOk ? "PASS" : "FAIL") << endl;
-
-    // 2. rebuild index from scratch and compare
-    IndexBuild();
-
+bool compare_label(const ArrayOnHeap<vector<unsigned>>& reorderLabel) {
     bool labelOk = true;
     for (int u = 0; u < totalV; ++u) {
         if (label[u].size() != reorderLabel[u].size()) {
@@ -2131,9 +2256,101 @@ void TestReorder() {
             }
         }
     }
+    return labelOk;
+}
+
+void TestReorder() {
+    cout << "=== TestReorder ===" << endl;
+
+    GraphReorder();
+
+    double t = omp_get_wtime();
+    IndexReorder();
+    cout << "Reorder time:  " << omp_get_wtime() - t << " s" << endl;
+
+    ArrayOnHeap<vector<unsigned>> reorderLabel = std::move(label);
+    ArrayOnHeap<vector<int>> reorderPos = std::move(pos);
+
+    bool posOk = PosCheck(reorderLabel.data(), reorderPos.data());
+    cout << "pos check: " << (posOk ? "PASS" : "FAIL") << endl;
+
+    // 2. rebuild index from scratch and compare
+    IndexBuild();
+
+    bool labelOk = compare_label(reorderLabel);
     cout << "label check: " << (labelOk ? "PASS" : "FAIL") << endl;
 
     cout << "=== TestReorder Done ===" << endl;
+}
+
+void BatchUpdateAndReorder(const std::vector<std::pair<int, int>>& addEdges,
+                           const std::vector<std::pair<int, int>>& delEdges) {
+    for (int v = 0; v < totalV; ++v) {
+        conD[v].clear();
+    }
+    for (const auto& e : delEdges) {
+        DeleteEdge(e.first, e.second);
+    }
+    double tUpdate = omp_get_wtime();
+    IndexDel_Parallel();
+    IndexDel_Add();
+    double tDel = omp_get_wtime();
+    cout << "Label delete time: " << tDel - tUpdate << " s" << endl;
+
+    for (int v = 0; v < totalV; ++v) {
+        conD[v].clear();
+    }
+    for (const auto& e : addEdges) {
+        int u = e.first, v = e.second;
+        InsertEdge(u, v);
+    }
+
+    double tIns = omp_get_wtime();
+    Insert_Parallel();
+    Insert_Remove_Parall();
+    merge_labels(clab);
+    build_pos_from_label();
+    double tUpdateFin = omp_get_wtime();
+
+    for (int v = 0; v < totalV; ++v) {
+        conD[v].clear();
+    }
+    cout << "Label update time: " << tUpdateFin - tIns << " s" << endl;
+    cout << "Label update time: " << tUpdateFin - tIns + tDel - tUpdate << " s" << endl;
+
+    long long updatedLabelCnt = 0;
+    for (int u = 0; u < totalV; ++u) updatedLabelCnt += (long long)label[u].size();
+    cout << "Label size after update: " << updatedLabelCnt << endl;
+
+    GraphReorder();
+    double tReorder = omp_get_wtime();
+    IndexReorder();
+    cout << "Index reorder time: " << omp_get_wtime() - tReorder << " s" << endl;
+
+    long long reorderLabelCnt = 0;
+    for (int u = 0; u < totalV; ++u) reorderLabelCnt += (long long)label[u].size();
+    cout << "Label size after GraphReorder+IndexReorder: " << reorderLabelCnt << endl;
+}
+
+void TestRandomAddDeleteReorder(int p, int q) {
+    cout << "=== TestRandomAddDeleteReorder ===" << endl;
+    cout << "p = " << p << ", q = " << q << endl;
+
+    std::vector<std::pair<int, int>> addEdges, delEdges;
+    RandomAddDeleteByDegree(p, q, addEdges, delEdges);
+
+    BatchUpdateAndReorder(addEdges, delEdges);
+
+    ArrayOnHeap<std::vector<unsigned>> reorderLabel = std::move(label);
+    ArrayOnHeap<std::vector<int>> reorderPos = std::move(pos);
+
+    bool posOk = PosCheck(reorderLabel.data(), reorderPos.data());
+    cout << "pos check: " << (posOk ? "PASS" : "FAIL") << endl;
+
+    IndexBuild();
+    bool labelOK = compare_label(reorderLabel);
+
+    cout << "=== TestRandomAddDeleteReorder Done ===" << endl;
 }
 
 unsigned Query(int u, int v) {
@@ -2319,6 +2536,78 @@ void TestOrderReorder(string graphName, string srcOrder, string tgtOrder) {
     // #endregion
 }
 
+size_t update_from_dynamic_graph_file(DynamicEdgeReader& reader, size_t cntEvent) {
+    size_t edgeDelta = 0;
+    DynamicEdgeEvent e;
+    std::map<std::pair<int, int>, int> cntEdge;
+    for (size_t i = 0; i < cntEvent; ++i) {
+        bool succ = reader.NextEdge(e);
+        if (!succ) break;
+        e.u = v2p[e.u];
+        e.v = v2p[e.v];
+        if (e.u > e.v) std::swap(e.u, e.v);
+        if (e.delta == 1) {
+            if (cntEdge[std::make_pair(e.u, e.v)] == 0) {
+                InsertEdge(e.u, e.v);
+                ++edgeDelta;
+            } else {
+                assert(0);
+            }
+            cntEdge[std::make_pair(e.u, e.v)] += 1;
+        } else if (e.delta == -1) {
+            if (cntEdge[std::make_pair(e.u, e.v)] == 1) {
+                DeleteEdge(e.u, e.v);
+                --edgeDelta;
+            } else {
+                assert(0);
+            }
+            cntEdge[std::make_pair(e.u, e.v)] -= 1;
+        } else {
+            assert(0);
+        }
+    }
+    return edgeDelta;
+}
+
+size_t get_batch_from_dynamic_graph_file(DynamicEdgeReader& reader, size_t cntEvent,
+                                         std::vector<std::pair<int, int>>& addEdges,
+                                         std::vector<std::pair<int, int>>& delEdges) {
+    addEdges.clear();
+    delEdges.clear();
+
+    size_t edgeDelta = 0;
+    DynamicEdgeEvent e;
+    std::map<std::pair<int, int>, int> cntEdge;
+    for (size_t i = 0; i < cntEvent; ++i) {
+        bool succ = reader.NextEdge(e);
+        if (!succ) break;
+        e.u = v2p[e.u];
+        e.v = v2p[e.v];
+        if (e.u > e.v) std::swap(e.u, e.v);
+
+        const std::pair<int, int> edge = std::make_pair(e.u, e.v);
+        if (e.delta == 1) {
+            cntEdge[edge] += 1;
+        } else if (e.delta == -1) {
+            cntEdge[edge] -= 1;
+        } else {
+            assert(0);
+        }
+    }
+
+    for (auto [e, cnt] : cntEdge) {
+        if (cnt == 1) {
+            addEdges.push_back(e);
+        } else if (cnt == -1) {
+            delEdges.push_back(e);
+        } else {
+            assert(cnt == 0);
+        }
+    }
+
+    return edgeDelta;
+}
+
 int main(int argc, char** argv) {
     threads = 1;
     // Graphpath = argv[1];
@@ -2349,7 +2638,9 @@ int main(int argc, char** argv) {
     dynamic_edge_num = atoi(argv[6]);  // the number of dynamic edges
     query_task_num = atoi(argv[7]);    // the number of query tasks
 
-    GraphInitial(Graphpath);
+    if (program_choice != 11) {
+        GraphInitial(Graphpath);
+    }
 
     if (program_choice == 0) {
         float t = omp_get_wtime();
@@ -2495,6 +2786,55 @@ int main(int argc, char** argv) {
         assert(equal);
 
         TestReorder();
+    } else if (program_choice == 10) {
+        IndexLoad(Indexpath);
+        TestRandomAddDeleteReorder(50000, 50000);
+    } else if (program_choice == 11) {
+        DynamicEdgeReader reader(Graphpath, 1);
+        totalV = reader.VertexCount();
+
+        con.resize(totalV);
+        conD.resize(totalV);
+        Parameter();
+
+        v2p.resize(totalV, -1);
+        p2v.resize(totalV, -1);
+
+        for (int i = 0; i < totalV; ++i) {
+            v2p[i] = i;  // old 2 new
+            p2v[i] = i;  // new 2 old
+        }
+
+        update_from_dynamic_graph_file(reader, 1e6);
+
+        v2degree.resize(totalV, std::make_pair(-1, -1));
+
+        GraphReorder();
+
+        double buildStart = omp_get_wtime();
+        IndexBuild();
+        double buildEnd = omp_get_wtime();
+
+        for (int i = 0; i < 10; ++i) {
+            std::cout << "Round " << i << std::endl;
+            std::vector<std::pair<int, int>> addEdges, delEdges;
+            get_batch_from_dynamic_graph_file(reader, 1e6, addEdges, delEdges);
+            BatchUpdateAndReorder(addEdges, delEdges);
+            build_pos_from_label();
+            // check_label_validity("after batch update");
+            bool posOk = PosCheck(label.data(), pos.data());
+            assert(posOk);
+
+            // ArrayOnHeap<std::vector<unsigned>> reorderLabel = std::move(label);
+            // ArrayOnHeap<std::vector<int>> reorderPos = std::move(pos);
+
+            // posOk = PosCheck(reorderLabel.data(), reorderPos.data());
+            // cout << "pos check: " << (posOk ? "PASS" : "FAIL") << endl;
+
+            // IndexBuild();
+            // bool labelOK = compare_label(reorderLabel);
+            // assert(labelOK);
+        }
     }
 
     return 0;
